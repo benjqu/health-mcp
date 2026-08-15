@@ -21,33 +21,69 @@ const oauthRequest: AuthRequest = {
 };
 
 describe("createGitHubAuthHandler", () => {
+  it("completes GitHub authentication and one-time consent without browser cookies", async () => {
+    const fixture = authFixture();
+    const handler = createGitHubAuthHandler({
+      request: githubResponses({ id: 42, login: "octocat" }),
+      randomUUID: sequence("github-state", "consent-token")
+    });
+
+    const start = await handler.fetch(authorizeRequest(), fixture.env, executionContext());
+    expect(start.status).toBe(302);
+    const githubAuthorize = new URL(start.headers.get("Location") ?? "https://missing.example");
+    expect(githubAuthorize.origin + githubAuthorize.pathname).toBe("https://github.com/login/oauth/authorize");
+
+    const callback = await handler.fetch(new Request(
+      `${baseUrl}/callback?code=github-code&state=${githubAuthorize.searchParams.get("state")}`
+    ), fixture.env, executionContext());
+    expect(callback.status).toBe(200);
+    const consentToken = fieldValue(await callback.text(), "consent_token");
+
+    const approve = await handler.fetch(new Request(`${baseUrl}/consent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ action: "approve", consent_token: consentToken })
+    }), fixture.env, executionContext());
+
+    expect(approve.status).toBe(302);
+    expect(approve.headers.get("Location")).toBe("https://client.example/authorized");
+    expect(fixture.completed).toMatchObject({
+      request: oauthRequest,
+      userId: "42",
+      scope: ["fitness:read"],
+      props: { githubUserId: 42, githubLogin: "octocat" }
+    });
+
+    const replay = await handler.fetch(new Request(`${baseUrl}/consent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ action: "approve", consent_token: consentToken })
+    }), fixture.env, executionContext());
+    expect(replay.status).toBe(400);
+  });
+
   it("renders an escaped consent page for the single read scope", async () => {
     const fixture = authFixture({
       clientName: `<script>alert("unsafe")</script>`
     });
-    const handler = createGitHubAuthHandler({ randomUUID: () => "csrf-token" });
+    const handler = createGitHubAuthHandler({
+      request: githubResponses({ id: 42, login: "octocat" }),
+      randomUUID: sequence("github-state", "consent-token")
+    });
 
-    const response = await handler.fetch(authorizeRequest(), fixture.env, executionContext());
+    const started = await startGitHubFlow(handler, fixture.env);
+    const response = await handler.fetch(new Request(
+      `${baseUrl}/callback?code=github-code&state=${started.state}`
+    ), fixture.env, executionContext());
     const html = await response.text();
 
     expect(response.status).toBe(200);
     expect(response.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
-    expect(response.headers.get("Set-Cookie")).toContain("__Host-fitness-consent=csrf-token");
+    expect(response.headers.get("Set-Cookie")).toBeNull();
     expect(html).toContain("fitness:read");
     expect(html).toContain("&lt;script&gt;alert(&quot;unsafe&quot;)&lt;/script&gt;");
     expect(html).not.toContain(`<script>alert("unsafe")</script>`);
-  });
-
-  it("sets a partitioned cross-site cookie for consent shown inside an embedded OAuth flow", async () => {
-    const fixture = authFixture();
-    const handler = createGitHubAuthHandler({ randomUUID: () => "csrf-token" });
-
-    const response = await handler.fetch(authorizeRequest(), fixture.env, executionContext());
-    const setCookie = response.headers.get("Set-Cookie") ?? "";
-
-    expect(setCookie).toContain("__Host-fitness-consent=csrf-token");
-    expect(setCookie).toContain("SameSite=None");
-    expect(setCookie).toContain("Partitioned");
+    expect(fieldValue(html, "consent_token")).toBe("consent-token");
   });
 
   it("uses the canonical callback, normalizes both logins, and grants only fitness:read", async () => {
@@ -75,7 +111,7 @@ describe("createGitHubAuthHandler", () => {
     });
     const handler = createGitHubAuthHandler({
       request: githubFetch,
-      randomUUID: sequence("consent-token", "github-state")
+      randomUUID: sequence("github-state", "consent-token")
     });
 
     const response = await completeGitHubFlow(handler, fixture.env);
@@ -103,10 +139,13 @@ describe("createGitHubAuthHandler", () => {
     const githubFetch = githubResponses({ id: 43, login: "octocat-other" });
     const handler = createGitHubAuthHandler({
       request: githubFetch,
-      randomUUID: sequence("consent-token", "github-state")
+      randomUUID: sequence("github-state", "consent-token")
     });
 
-    const response = await completeGitHubFlow(handler, fixture.env);
+    const started = await startGitHubFlow(handler, fixture.env);
+    const response = await handler.fetch(new Request(
+      `${baseUrl}/callback?code=github-code&state=${started.state}`
+    ), fixture.env, executionContext());
     const redirect = new URL(response.headers.get("Location") ?? "https://missing.example");
 
     expect(response.status).toBe(302);
@@ -121,12 +160,11 @@ describe("createGitHubAuthHandler", () => {
     const githubFetch = vi.fn<typeof fetch>();
     const handler = createGitHubAuthHandler({
       request: githubFetch,
-      randomUUID: sequence("consent-token", "github-state")
+      randomUUID: sequence("github-state", "consent-token")
     });
     const started = await startGitHubFlow(handler, fixture.env);
     const callback = new Request(
-      `${baseUrl}/callback?error=access_denied&error_description=private-provider-detail&state=${started.state}`,
-      { headers: { Cookie: started.stateCookie } }
+      `${baseUrl}/callback?error=access_denied&error_description=private-provider-detail&state=${started.state}`
     );
 
     const response = await handler.fetch(callback, fixture.env, executionContext());
@@ -137,7 +175,6 @@ describe("createGitHubAuthHandler", () => {
     expect(redirect.searchParams.get("error")).toBe("access_denied");
     expect(redirect.searchParams.get("error_description")).toBeNull();
     expect(redirect.searchParams.get("state")).toBe(oauthRequest.state);
-    expect(response.headers.get("Set-Cookie")).toContain("__Host-fitness-state=;");
     expect(githubFetch).not.toHaveBeenCalled();
     expect(fixture.completed).toBeUndefined();
 
@@ -147,25 +184,20 @@ describe("createGitHubAuthHandler", () => {
   });
 
   it.each([
-    { label: "missing", csrfToken: undefined },
-    { label: "mismatched", csrfToken: "wrong-token" }
-  ])("rejects a $label consent token before creating GitHub state", async ({ csrfToken }) => {
+    { label: "missing", consentToken: undefined },
+    { label: "unknown", consentToken: "wrong-token" }
+  ])("rejects a $label one-time consent token", async ({ consentToken }) => {
     const fixture = authFixture();
     const githubFetch = vi.fn<typeof fetch>();
-    const handler = createGitHubAuthHandler({ request: githubFetch, randomUUID: () => "consent-token" });
-    const authorize = authorizeRequest();
-    const consent = await handler.fetch(authorize, fixture.env, executionContext());
+    const handler = createGitHubAuthHandler({ request: githubFetch });
     const body = new URLSearchParams({ action: "approve" });
-    if (csrfToken !== undefined) {
-      body.set("csrf_token", csrfToken);
+    if (consentToken !== undefined) {
+      body.set("consent_token", consentToken);
     }
 
-    const response = await handler.fetch(new Request(authorize.url, {
+    const response = await handler.fetch(new Request(`${baseUrl}/consent`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        Cookie: cookiePair(consent)
-      },
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body
     }), fixture.env, executionContext());
 
@@ -174,48 +206,21 @@ describe("createGitHubAuthHandler", () => {
     expect(githubFetch).not.toHaveBeenCalled();
   });
 
-  it("rejects a mismatched callback cookie without consuming valid state", async () => {
-    const fixture = authFixture();
-    const githubFetch = vi.fn(githubResponses({ id: 42, login: "octocat" }));
-    const handler = createGitHubAuthHandler({
-      request: githubFetch,
-      randomUUID: sequence("consent-token", "github-state")
-    });
-    const started = await startGitHubFlow(handler, fixture.env);
-
-    const rejected = await handler.fetch(new Request(
-      `${baseUrl}/callback?code=github-code&state=${started.state}`,
-      { headers: { Cookie: "__Host-fitness-state=wrong-state-digest" } }
-    ), fixture.env, executionContext());
-
-    expect(rejected.status).toBe(400);
-    expect(githubFetch).not.toHaveBeenCalled();
-
-    const accepted = await handler.fetch(new Request(
-      `${baseUrl}/callback?code=github-code&state=${started.state}`,
-      { headers: { Cookie: started.stateCookie } }
-    ), fixture.env, executionContext());
-    expect(accepted.status).toBe(302);
-    expect(fixture.completed).toBeDefined();
-  });
-
   it("rejects a missing or expired stored callback state before GitHub exchange", async () => {
     const fixture = authFixture();
     const githubFetch = vi.fn<typeof fetch>();
     const handler = createGitHubAuthHandler({
       request: githubFetch,
-      randomUUID: sequence("consent-token", "github-state")
+      randomUUID: sequence("github-state", "consent-token")
     });
     const started = await startGitHubFlow(handler, fixture.env);
     await fixture.env.OAUTH_KV.delete(`github-oauth-state:${started.state}`);
 
     const response = await handler.fetch(new Request(
-      `${baseUrl}/callback?code=github-code&state=${started.state}`,
-      { headers: { Cookie: started.stateCookie } }
+      `${baseUrl}/callback?code=github-code&state=${started.state}`
     ), fixture.env, executionContext());
 
     expect(response.status).toBe(400);
-    expect(response.headers.get("Set-Cookie")).toContain("__Host-fitness-state=;");
     expect(githubFetch).not.toHaveBeenCalled();
     expect(fixture.completed).toBeUndefined();
   });
@@ -225,19 +230,15 @@ describe("createGitHubAuthHandler", () => {
     const githubFetch = vi.fn(githubResponses({ id: 42, login: "octocat" }));
     const handler = createGitHubAuthHandler({
       request: githubFetch,
-      randomUUID: sequence("consent-token", "github-state")
+      randomUUID: sequence("github-state", "consent-token")
     });
     const started = await startGitHubFlow(handler, fixture.env);
     const callbackUrl = `${baseUrl}/callback?code=github-code&state=${started.state}`;
 
-    const first = await handler.fetch(new Request(callbackUrl, {
-      headers: { Cookie: started.stateCookie }
-    }), fixture.env, executionContext());
-    const replay = await handler.fetch(new Request(callbackUrl, {
-      headers: { Cookie: started.stateCookie }
-    }), fixture.env, executionContext());
+    const first = await handler.fetch(new Request(callbackUrl), fixture.env, executionContext());
+    const replay = await handler.fetch(new Request(callbackUrl), fixture.env, executionContext());
 
-    expect(first.status).toBe(302);
+    expect(first.status).toBe(200);
     expect(replay.status).toBe(400);
     expect(githubFetch).toHaveBeenCalledTimes(2);
   });
@@ -264,10 +265,13 @@ describe("createGitHubAuthHandler", () => {
     const githubFetch = vi.fn<typeof fetch>(async () => new Response(leakedBody, { status: 401 }));
     const handler = createGitHubAuthHandler({
       request: githubFetch,
-      randomUUID: sequence("consent-token", "github-state")
+      randomUUID: sequence("github-state", "consent-token")
     });
 
-    const response = await completeGitHubFlow(handler, fixture.env);
+    const started = await startGitHubFlow(handler, fixture.env);
+    const response = await handler.fetch(new Request(
+      `${baseUrl}/callback?code=github-code&state=${started.state}`
+    ), fixture.env, executionContext());
     const body = await response.text();
 
     expect(response.status).toBe(502);
@@ -287,29 +291,25 @@ async function completeGitHubFlow(
   env: Env
 ): Promise<Response> {
   const started = await startGitHubFlow(handler, env);
+  const consent = await handler.fetch(new Request(
+    `${baseUrl}/callback?code=github-code&state=${started.state}`
+  ), env, executionContext());
+  expect(consent.status).toBe(200);
+  const consentToken = fieldValue(await consent.text(), "consent_token");
 
-  return handler.fetch(new Request(`${baseUrl}/callback?code=github-code&state=${started.state}`, {
-    headers: { Cookie: started.stateCookie }
+  return handler.fetch(new Request(`${baseUrl}/consent`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ action: "approve", consent_token: consentToken })
   }), env, executionContext());
 }
 
 async function startGitHubFlow(
   handler: GitHubAuthHandler,
   env: Env
-): Promise<{ state: string; stateCookie: string }> {
+): Promise<{ state: string }> {
   const authorize = authorizeRequest();
-  const consent = await handler.fetch(authorize, env, executionContext());
-  const consentCookie = cookiePair(consent);
-  const csrfToken = fieldValue(await consent.text(), "csrf_token");
-  const body = new URLSearchParams({ action: "approve", csrf_token: csrfToken });
-  const approve = await handler.fetch(new Request(authorize.url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Cookie: consentCookie
-    },
-    body
-  }), env, executionContext());
+  const approve = await handler.fetch(authorize, env, executionContext());
 
   expect(approve.status).toBe(302);
   const githubAuthorize = new URL(approve.headers.get("Location") ?? "https://missing.example");
@@ -319,16 +319,7 @@ async function startGitHubFlow(
   const state = githubAuthorize.searchParams.get("state");
   expect(state).toBeTruthy();
 
-  return {
-    state: state ?? "",
-    stateCookie: cookiePair(approve)
-  };
-}
-
-function cookiePair(response: Response): string {
-  const cookie = response.headers.get("Set-Cookie");
-  expect(cookie).toBeTruthy();
-  return cookie?.split(";", 1)[0] ?? "";
+  return { state: state ?? "" };
 }
 
 function fieldValue(html: string, name: string): string {
