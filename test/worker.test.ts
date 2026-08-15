@@ -114,32 +114,29 @@ describe("fitness MCP Worker", () => {
     authorizeUrl.searchParams.set("scope", "fitness:read");
     authorizeUrl.searchParams.set("state", "client-state");
     authorizeUrl.searchParams.set("resource", `${baseUrl}/mcp`);
-    const consent = await protectedWorker.fetch(
+    const start = await protectedWorker.fetch(
       new Request(authorizeUrl),
       testEnv,
       executionContext()
     );
-    expect(consent.status).toBe(200);
-    const csrfToken = fieldValue(await consent.text(), "csrf_token");
-    const approve = await protectedWorker.fetch(new Request(authorizeUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        Cookie: cookiePair(consent)
-      },
-      body: new URLSearchParams({ action: "approve", csrf_token: csrfToken })
-    }), testEnv, executionContext());
-    expect(approve.status).toBe(302);
-    const githubAuthorize = new URL(approve.headers.get("Location") ?? "https://missing.example");
+    expect(start.status).toBe(302);
+    const githubAuthorize = new URL(start.headers.get("Location") ?? "https://missing.example");
     const githubState = githubAuthorize.searchParams.get("state");
     expect(githubState).toBeTruthy();
 
     const callback = await protectedWorker.fetch(new Request(
-      `${baseUrl}/callback?code=github-code&state=${githubState}`,
-      { headers: { Cookie: cookiePair(approve) } }
+      `${baseUrl}/callback?code=github-code&state=${githubState}`
     ), testEnv, executionContext());
-    expect(callback.status).toBe(302);
-    const clientCallback = new URL(callback.headers.get("Location") ?? "https://missing.example");
+    expect(callback.status).toBe(200);
+    const consentToken = fieldValue(await callback.text(), "consent_token");
+
+    const approve = await protectedWorker.fetch(new Request(`${baseUrl}/consent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ action: "approve", consent_token: consentToken })
+    }), testEnv, executionContext());
+    expect(approve.status).toBe(302);
+    const clientCallback = new URL(approve.headers.get("Location") ?? "https://missing.example");
     expect(clientCallback.origin + clientCallback.pathname).toBe(clientRedirectUri);
     expect(clientCallback.searchParams.get("state")).toBe("client-state");
     const authorizationCode = clientCallback.searchParams.get("code");
@@ -254,12 +251,6 @@ function memoryKv(): KVNamespace {
       };
     }
   } as unknown as KVNamespace;
-}
-
-function cookiePair(response: Response): string {
-  const cookie = response.headers.get("Set-Cookie");
-  expect(cookie).toBeTruthy();
-  return cookie?.split(";", 1)[0] ?? "";
 }
 
 function fieldValue(html: string, name: string): string {
