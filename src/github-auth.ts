@@ -9,13 +9,13 @@ import { readPublicConfig, type Env } from "./env";
 const FITNESS_READ_SCOPE = "fitness:read";
 const AUTHORIZE_PATH = "/authorize";
 const CALLBACK_PATH = "/callback";
+const CONSENT_PATH = "/consent";
 const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
 const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
 const GITHUB_USER_URL = "https://api.github.com/user";
 const STATE_PREFIX = "github-oauth-state:";
+const CONSENT_PREFIX = "github-oauth-consent:";
 const FLOW_TTL_SECONDS = 10 * 60;
-const CONSENT_COOKIE = "__Host-fitness-consent";
-const STATE_COOKIE = "__Host-fitness-state";
 
 const githubTokenSchema = z.object({
   access_token: z.string().min(1),
@@ -52,7 +52,11 @@ export function createGitHubAuthHandler(
       }
 
       if (url.pathname === CALLBACK_PATH) {
-        return handleCallback(incoming, env, request);
+        return handleCallback(incoming, env, request, randomUUID);
+      }
+
+      if (url.pathname === CONSENT_PATH) {
+        return handleConsent(incoming, env);
       }
 
       return new Response("Not Found", { status: 404 });
@@ -65,8 +69,8 @@ async function handleAuthorize(
   env: Env,
   randomUUID: () => string
 ): Promise<Response> {
-  if (request.method !== "GET" && request.method !== "POST") {
-    return methodNotAllowed("GET, POST");
+  if (request.method !== "GET") {
+    return methodNotAllowed("GET");
   }
 
   const oauthRequest = await parseAuthorizationRequest(request, env);
@@ -89,31 +93,6 @@ async function handleAuthorize(
     return new Response("Invalid authorization request", { status: 400 });
   }
 
-  if (request.method === "GET") {
-    const csrfToken = randomUUID();
-    return consentPage(request, client, csrfToken);
-  }
-
-  let form: FormData;
-  try {
-    form = await request.formData();
-  } catch {
-    return new Response("Invalid consent response", { status: 400 });
-  }
-
-  const csrfToken = form.get("csrf_token");
-  if (
-    typeof csrfToken !== "string" ||
-    csrfToken.length === 0 ||
-    csrfToken !== cookieValue(request, CONSENT_COOKIE)
-  ) {
-    return new Response("Invalid consent response", { status: 400 });
-  }
-
-  if (form.get("action") !== "approve") {
-    return oauthErrorRedirect(oauthRequest, "access_denied", clearConsentCookie());
-  }
-
   const config = readPublicConfig(env);
   const state = randomUUID();
   await env.OAUTH_KV.put(`${STATE_PREFIX}${state}`, JSON.stringify(oauthRequest), {
@@ -125,16 +104,14 @@ async function handleAuthorize(
   githubUrl.searchParams.set("redirect_uri", `${config.MCP_BASE_URL}${CALLBACK_PATH}`);
   githubUrl.searchParams.set("state", state);
 
-  const headers = new Headers({ Location: githubUrl.toString() });
-  headers.append("Set-Cookie", secureCookie(STATE_COOKIE, await sha256Hex(state)));
-  headers.append("Set-Cookie", clearConsentCookie());
-  return new Response(null, { status: 302, headers });
+  return redirectResponse(githubUrl.toString());
 }
 
 async function handleCallback(
   request: Request,
   env: Env,
-  githubFetch: typeof fetch
+  githubFetch: typeof fetch,
+  randomUUID: () => string
 ): Promise<Response> {
   if (request.method !== "GET") {
     return methodNotAllowed("GET");
@@ -142,13 +119,7 @@ async function handleCallback(
 
   const url = new URL(request.url);
   const state = url.searchParams.get("state");
-  const stateCookie = cookieValue(request, STATE_COOKIE);
-  if (
-    state === null ||
-    state.length === 0 ||
-    stateCookie === undefined ||
-    stateCookie !== await sha256Hex(state)
-  ) {
+  if (state === null || state.length === 0) {
     return new Response("Invalid GitHub callback", { status: 400 });
   }
 
@@ -156,30 +127,21 @@ async function handleCallback(
   const serializedRequest = await env.OAUTH_KV.get(stateKey);
   await env.OAUTH_KV.delete(stateKey);
   if (serializedRequest === null) {
-    return responseWithCookie(
-      new Response("Invalid GitHub callback", { status: 400 }),
-      clearCookie(STATE_COOKIE)
-    );
+    return new Response("Invalid GitHub callback", { status: 400 });
   }
 
   const oauthRequest = storedAuthRequest(serializedRequest);
   if (oauthRequest === undefined || !hasExactReadScope(oauthRequest.scope)) {
-    return responseWithCookie(
-      new Response("Invalid GitHub callback", { status: 400 }),
-      clearCookie(STATE_COOKIE)
-    );
+    return new Response("Invalid GitHub callback", { status: 400 });
   }
 
   if (url.searchParams.get("error") === "access_denied") {
-    return oauthErrorRedirect(oauthRequest, "access_denied", clearCookie(STATE_COOKIE));
+    return oauthErrorRedirect(oauthRequest, "access_denied");
   }
 
   const code = url.searchParams.get("code");
   if (code === null || code.length === 0) {
-    return responseWithCookie(
-      new Response("Invalid GitHub callback", { status: 400 }),
-      clearCookie(STATE_COOKIE)
-    );
+    return new Response("Invalid GitHub callback", { status: 400 });
   }
 
   const config = readPublicConfig(env);
@@ -193,28 +155,73 @@ async function handleCallback(
     );
     githubUser = await getGitHubUser(githubFetch, accessToken);
   } catch {
-    return responseWithCookie(
-      new Response("GitHub authentication failed", { status: 502 }),
-      clearCookie(STATE_COOKIE)
-    );
+    return new Response("GitHub authentication failed", { status: 502 });
   }
 
   if (normalizeLogin(githubUser.login) !== normalizeLogin(config.ALLOWED_GITHUB_LOGIN)) {
-    return oauthErrorRedirect(oauthRequest, "access_denied", clearCookie(STATE_COOKIE));
+    return oauthErrorRedirect(oauthRequest, "access_denied");
+  }
+
+  let client: ClientInfo | null;
+  try {
+    client = await env.OAUTH_PROVIDER.lookupClient(oauthRequest.clientId);
+  } catch {
+    return new Response("Invalid authorization request", { status: 400 });
+  }
+  if (client === null) {
+    return new Response("Invalid authorization request", { status: 400 });
+  }
+
+  const consentToken = randomUUID();
+  await env.OAUTH_KV.put(`${CONSENT_PREFIX}${consentToken}`, JSON.stringify({
+    oauthRequest,
+    githubUser: { id: githubUser.id, login: githubUser.login }
+  }), { expirationTtl: FLOW_TTL_SECONDS });
+
+  return consentPage(client, consentToken);
+}
+
+async function handleConsent(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") {
+    return methodNotAllowed("POST");
+  }
+
+  let form: FormData;
+  try {
+    form = await request.formData();
+  } catch {
+    return new Response("Invalid consent response", { status: 400 });
+  }
+
+  const consentToken = form.get("consent_token");
+  if (typeof consentToken !== "string" || consentToken.length === 0) {
+    return new Response("Invalid consent response", { status: 400 });
+  }
+
+  const consentKey = `${CONSENT_PREFIX}${consentToken}`;
+  const serializedConsent = await env.OAUTH_KV.get(consentKey);
+  await env.OAUTH_KV.delete(consentKey);
+  const pending = serializedConsent === null ? undefined : storedConsent(serializedConsent);
+  if (pending === undefined) {
+    return new Response("Invalid consent response", { status: 400 });
+  }
+
+  if (form.get("action") !== "approve") {
+    return oauthErrorRedirect(pending.oauthRequest, "access_denied");
   }
 
   const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
-    request: oauthRequest,
-    userId: String(githubUser.id),
+    request: pending.oauthRequest,
+    userId: String(pending.githubUser.id),
     metadata: undefined,
     scope: [FITNESS_READ_SCOPE],
     props: {
-      githubUserId: githubUser.id,
-      githubLogin: githubUser.login
+      githubUserId: pending.githubUser.id,
+      githubLogin: pending.githubUser.login
     }
   });
 
-  return redirectResponse(redirectTo, clearCookie(STATE_COOKIE));
+  return redirectResponse(redirectTo);
 }
 
 async function parseAuthorizationRequest(request: Request, env: Env): Promise<AuthRequest | Response> {
@@ -282,10 +289,8 @@ async function getGitHubUser(request: typeof fetch, accessToken: string) {
   return githubUserSchema.parse(await response.json());
 }
 
-function consentPage(request: Request, client: ClientInfo, csrfToken: string): Response {
-  const url = new URL(request.url);
+function consentPage(client: ClientInfo, consentToken: string): Response {
   const clientName = escapeHtml(client.clientName ?? "MCP client");
-  const formAction = escapeHtml(`${url.pathname}${url.search}`);
   const html = `<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Authorize Fitness MCP</title></head>
@@ -294,9 +299,9 @@ function consentPage(request: Request, client: ClientInfo, csrfToken: string): R
     <h1>Authorize Fitness MCP</h1>
     <p>${clientName} is requesting read-only access.</p>
     <p>Scope: ${FITNESS_READ_SCOPE}</p>
-    <form method="post" action="${formAction}">
-      <input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}">
-      <button type="submit" name="action" value="approve">Continue with GitHub</button>
+    <form method="post" action="${CONSENT_PATH}">
+      <input type="hidden" name="consent_token" value="${escapeHtml(consentToken)}">
+      <button type="submit" name="action" value="approve">Allow read-only access</button>
       <button type="submit" name="action" value="deny">Deny</button>
     </form>
   </main>
@@ -309,7 +314,6 @@ function consentPage(request: Request, client: ClientInfo, csrfToken: string): R
       "Content-Security-Policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
       "Content-Type": "text/html; charset=utf-8",
       "Referrer-Policy": "no-referrer",
-      "Set-Cookie": secureConsentCookie(csrfToken),
       "X-Content-Type-Options": "nosniff",
       "X-Frame-Options": "DENY"
     }
@@ -343,10 +347,39 @@ function storedAuthRequest(value: string): AuthRequest | undefined {
   }
 }
 
+function storedConsent(value: string): {
+  oauthRequest: AuthRequest;
+  githubUser: { id: number; login: string };
+} | undefined {
+  try {
+    const parsed = JSON.parse(value) as {
+      oauthRequest?: unknown;
+      githubUser?: { id?: unknown; login?: unknown };
+    };
+    const oauthRequest = storedAuthRequest(JSON.stringify(parsed.oauthRequest));
+    if (
+      oauthRequest === undefined ||
+      !hasExactReadScope(oauthRequest.scope) ||
+      typeof parsed.githubUser?.id !== "number" ||
+      !Number.isInteger(parsed.githubUser.id) ||
+      parsed.githubUser.id <= 0 ||
+      typeof parsed.githubUser.login !== "string" ||
+      parsed.githubUser.login.length === 0
+    ) {
+      return undefined;
+    }
+    return {
+      oauthRequest,
+      githubUser: { id: parsed.githubUser.id, login: parsed.githubUser.login }
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 function oauthErrorRedirect(
   request: AuthRequest,
-  code: "access_denied",
-  setCookie?: string
+  code: "access_denied"
 ): Response {
   const redirect = new URL(request.redirectUri);
   redirect.searchParams.set("error", code);
@@ -354,53 +387,14 @@ function oauthErrorRedirect(
   if (request.issuer !== undefined) {
     redirect.searchParams.set("iss", request.issuer);
   }
-  return redirectResponse(redirect.toString(), setCookie);
+  return redirectResponse(redirect.toString());
 }
 
-function redirectResponse(location: string, setCookie?: string): Response {
+function redirectResponse(location: string): Response {
   return new Response(null, {
     status: 302,
-    headers: {
-      Location: location,
-      ...(setCookie === undefined ? {} : { "Set-Cookie": setCookie })
-    }
+    headers: { Location: location }
   });
-}
-
-function responseWithCookie(response: Response, setCookie: string): Response {
-  const headers = new Headers(response.headers);
-  headers.set("Set-Cookie", setCookie);
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers
-  });
-}
-
-function cookieValue(request: Request, name: string): string | undefined {
-  for (const entry of (request.headers.get("Cookie") ?? "").split(";")) {
-    const [cookieName, ...value] = entry.trim().split("=");
-    if (cookieName === name) {
-      return value.join("=");
-    }
-  }
-  return undefined;
-}
-
-function secureCookie(name: string, value: string): string {
-  return `${name}=${value}; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=${FLOW_TTL_SECONDS}`;
-}
-
-function secureConsentCookie(value: string): string {
-  return `${CONSENT_COOKIE}=${value}; HttpOnly; Secure; Path=/; SameSite=None; Partitioned; Max-Age=${FLOW_TTL_SECONDS}`;
-}
-
-function clearConsentCookie(): string {
-  return `${CONSENT_COOKIE}=; HttpOnly; Secure; Path=/; SameSite=None; Partitioned; Max-Age=0`;
-}
-
-function clearCookie(name: string): string {
-  return `${name}=; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=0`;
 }
 
 function methodNotAllowed(allow: string): Response {
@@ -408,11 +402,6 @@ function methodNotAllowed(allow: string): Response {
     status: 405,
     headers: { Allow: allow }
   });
-}
-
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function escapeHtml(value: string): string {
