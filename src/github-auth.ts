@@ -111,7 +111,7 @@ async function handleAuthorize(
   }
 
   if (form.get("action") !== "approve") {
-    return oauthErrorRedirect(oauthRequest, "access_denied", clearCookie(CONSENT_COOKIE));
+    return oauthErrorRedirect(oauthRequest, "access_denied", clearConsentCookie());
   }
 
   const config = readPublicConfig(env);
@@ -127,7 +127,7 @@ async function handleAuthorize(
 
   const headers = new Headers({ Location: githubUrl.toString() });
   headers.append("Set-Cookie", secureCookie(STATE_COOKIE, await sha256Hex(state)));
-  headers.append("Set-Cookie", clearCookie(CONSENT_COOKIE));
+  headers.append("Set-Cookie", clearConsentCookie());
   return new Response(null, { status: 302, headers });
 }
 
@@ -309,7 +309,7 @@ function consentPage(request: Request, client: ClientInfo, csrfToken: string): R
       "Content-Security-Policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
       "Content-Type": "text/html; charset=utf-8",
       "Referrer-Policy": "no-referrer",
-      "Set-Cookie": secureCookie(CONSENT_COOKIE, csrfToken),
+      "Set-Cookie": secureConsentCookie(csrfToken),
       "X-Content-Type-Options": "nosniff",
       "X-Frame-Options": "DENY"
     }
@@ -389,6 +389,14 @@ function cookieValue(request: Request, name: string): string | undefined {
 
 function secureCookie(name: string, value: string): string {
   return `${name}=${value}; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=${FLOW_TTL_SECONDS}`;
+}
+
+function secureConsentCookie(value: string): string {
+  return `${CONSENT_COOKIE}=${value}; HttpOnly; Secure; Path=/; SameSite=None; Partitioned; Max-Age=${FLOW_TTL_SECONDS}`;
+}
+
+function clearConsentCookie(): string {
+  return `${CONSENT_COOKIE}=; HttpOnly; Secure; Path=/; SameSite=None; Partitioned; Max-Age=0`;
 }
 
 function clearCookie(name: string): string {
