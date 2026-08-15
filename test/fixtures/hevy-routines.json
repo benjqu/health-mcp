@@ -1,0 +1,41 @@
+{
+  "page": 1,
+  "page_count": 2,
+  "routines": [
+    {
+      "id": "routine-synthetic-push",
+      "title": "Synthetic Push",
+      "folder_id": 7,
+      "updated_at": "2026-08-12T09:30:00-04:00",
+      "created_at": "2026-08-01T09:30:00-04:00",
+      "exercises": [
+        {
+          "id": "routine-exercise-bench",
+          "index": 0,
+          "title": "Bench Press (Barbell)",
+          "rest_seconds": 90,
+          "exercise_template_id": "template-bench",
+          "supersets_id": null,
+          "sets": [
+            {
+              "id": "routine-set-warmup",
+              "index": 0,
+              "type": "warmup",
+              "weight_kg": 40,
+              "reps": 10
+            },
+            {
+              "id": "routine-set-regular",
+              "index": 1,
+              "type": "normal",
+              "weight_kg": 60,
+              "reps": 8,
+              "rpe": 8
+            }
+          ]
+        }
+      ],
+      "future_provider_field": "ignored additive value"
+    }
+  ]
+}

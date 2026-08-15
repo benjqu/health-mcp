@@ -1,0 +1,12 @@
+{
+  "data": {
+    "id": 9001,
+    "username": "synthetic-logbook-user",
+    "first_name": "Synthetic",
+    "last_name": "User",
+    "gender": "X",
+    "dob": "1990-01-01",
+    "email": "synthetic@example.test",
+    "country": "USA"
+  }
+}

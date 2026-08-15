@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "health-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-15",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  // Keep the canonical workers.dev origin available for MCP_BASE_URL.
+  "workers_dev": true,
+  // These are public runtime configuration, not secrets. Replace before deployment.
+  "vars": {
+    "ALLOWED_GITHUB_LOGIN": "replace-with-approved-github-login",
+    "MCP_BASE_URL": "https://fitness-mcp.<account-subdomain>.workers.dev"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "8df008f8ee224e278864629480727e62"
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "page": 1,
+  "page_count": 2,
+  "workouts": [
+    {
+      "id": "workout-synthetic-lower",
+      "title": "Synthetic Lower",
+      "routine_id": "routine-synthetic-lower",
+      "description": "Synthetic workout description",
+      "start_time": "2026-08-12T14:00:00-04:00",
+      "end_time": "2026-08-12T15:10:00-04:00",
+      "updated_at": "2026-08-12T15:15:00-04:00",
+      "created_at": "2026-08-12T14:00:00-04:00",
+      "exercises": [
+        {
+          "id": "workout-exercise-squat",
+          "index": 0,
+          "title": "Barbell Squat",
+          "exercise_template_id": "template-squat",
+          "supersets_id": null,
+          "sets": [
+            {
+              "id": "set-warmup",
+              "index": 0,
+              "type": "warmup",
+              "weight_kg": 60,
+              "reps": 8
+            },
+            {
+              "id": "set-regular",
+              "index": 1,
+              "type": "normal",
+              "weight_kg": 100,
+              "reps": 5,
+              "rpe": 8.5
+            },
+            {
+              "id": "set-drop",
+              "index": 2,
+              "type": "dropset",
+              "weight_kg": 80,
+              "reps": 8
+            },
+            {
+              "id": "set-failure",
+              "index": 3,
+              "type": "failure",
+              "weight_kg": 70,
+              "reps": 10
+            }
+          ]
+        }
+      ],
+      "future_provider_field": {
+        "version": 2
+      }
+    }
+  ]
+}
