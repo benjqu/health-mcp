@@ -38,6 +38,18 @@ describe("createGitHubAuthHandler", () => {
     expect(html).not.toContain(`<script>alert("unsafe")</script>`);
   });
 
+  it("sets a partitioned cross-site cookie for consent shown inside an embedded OAuth flow", async () => {
+    const fixture = authFixture();
+    const handler = createGitHubAuthHandler({ randomUUID: () => "csrf-token" });
+
+    const response = await handler.fetch(authorizeRequest(), fixture.env, executionContext());
+    const setCookie = response.headers.get("Set-Cookie") ?? "";
+
+    expect(setCookie).toContain("__Host-fitness-consent=csrf-token");
+    expect(setCookie).toContain("SameSite=None");
+    expect(setCookie).toContain("Partitioned");
+  });
+
   it("uses the canonical callback, normalizes both logins, and grants only fitness:read", async () => {
     const githubAccessToken = "github-access-token-must-not-be-stored";
     const fixture = authFixture({ allowedLogin: "  OCTOCAT  " });
