@@ -82,7 +82,9 @@ describe("createGitHubAuthHandler", () => {
     expect(response.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
     expect(response.headers.get("Set-Cookie")).toBeNull();
     expect(html).toContain("fitness:read");
-    expect(html).toContain('<form method="post" action="">');
+    expect(html).toContain(
+      '<form method="post" action="/callback?code=github-code&amp;state=github-state">'
+    );
     expect(html).toContain("&lt;script&gt;alert(&quot;unsafe&quot;)&lt;/script&gt;");
     expect(html).not.toContain(`<script>alert("unsafe")</script>`);
     expect(fieldValue(html, "consent_token").split(".")).toHaveLength(2);
