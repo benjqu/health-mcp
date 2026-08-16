@@ -176,7 +176,7 @@ async function handleCallback(
     githubUser: { id: githubUser.id, login: githubUser.login }
   }, env.GITHUB_CLIENT_SECRET, randomUUID());
 
-  return consentPage(client, consentToken);
+  return consentPage(request, client, consentToken);
 }
 
 async function handleConsent(request: Request, env: Env): Promise<Response> {
@@ -284,8 +284,10 @@ async function getGitHubUser(request: typeof fetch, accessToken: string) {
   return githubUserSchema.parse(await response.json());
 }
 
-function consentPage(client: ClientInfo, consentToken: string): Response {
+function consentPage(request: Request, client: ClientInfo, consentToken: string): Response {
+  const url = new URL(request.url);
   const clientName = escapeHtml(client.clientName ?? "MCP client");
+  const formAction = escapeHtml(`${url.pathname}${url.search}`);
   const html = `<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Authorize Fitness MCP</title></head>
@@ -294,7 +296,7 @@ function consentPage(client: ClientInfo, consentToken: string): Response {
     <h1>Authorize Fitness MCP</h1>
     <p>${clientName} is requesting read-only access.</p>
     <p>Scope: ${FITNESS_READ_SCOPE}</p>
-    <form method="post" action="">
+    <form method="post" action="${formAction}">
       <input type="hidden" name="consent_token" value="${escapeHtml(consentToken)}">
       <button type="submit" name="action" value="approve">Allow read-only access</button>
       <button type="submit" name="action" value="deny">Deny</button>
