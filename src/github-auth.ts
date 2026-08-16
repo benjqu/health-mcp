@@ -14,8 +14,9 @@ const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
 const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
 const GITHUB_USER_URL = "https://api.github.com/user";
 const STATE_PREFIX = "github-oauth-state:";
-const CONSENT_PREFIX = "github-oauth-consent:";
 const FLOW_TTL_SECONDS = 10 * 60;
+const CONSENT_TOKEN_VERSION = 1;
+const CONSENT_KEY_CONTEXT = "fitness-mcp-consent-v1";
 
 const githubTokenSchema = z.object({
   access_token: z.string().min(1),
@@ -172,11 +173,10 @@ async function handleCallback(
     return new Response("Invalid authorization request", { status: 400 });
   }
 
-  const consentToken = randomUUID();
-  await env.OAUTH_KV.put(`${CONSENT_PREFIX}${consentToken}`, JSON.stringify({
+  const consentToken = await createConsentToken({
     oauthRequest,
     githubUser: { id: githubUser.id, login: githubUser.login }
-  }), { expirationTtl: FLOW_TTL_SECONDS });
+  }, env.GITHUB_CLIENT_SECRET, randomUUID());
 
   return consentPage(client, consentToken);
 }
@@ -198,10 +198,7 @@ async function handleConsent(request: Request, env: Env): Promise<Response> {
     return new Response("Invalid consent response", { status: 400 });
   }
 
-  const consentKey = `${CONSENT_PREFIX}${consentToken}`;
-  const serializedConsent = await env.OAUTH_KV.get(consentKey);
-  await env.OAUTH_KV.delete(consentKey);
-  const pending = serializedConsent === null ? undefined : storedConsent(serializedConsent);
+  const pending = await verifyConsentToken(consentToken, env.GITHUB_CLIENT_SECRET);
   if (pending === undefined) {
     return new Response("Invalid consent response", { status: 400 });
   }
@@ -375,6 +372,105 @@ function storedConsent(value: string): {
   } catch {
     return undefined;
   }
+}
+
+async function createConsentToken(
+  pending: { oauthRequest: AuthRequest; githubUser: { id: number; login: string } },
+  secret: string,
+  nonce: string
+): Promise<string> {
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const payload = base64UrlEncode(new TextEncoder().encode(JSON.stringify({
+    version: CONSENT_TOKEN_VERSION,
+    issuedAt,
+    expiresAt: issuedAt + FLOW_TTL_SECONDS,
+    nonce,
+    ...pending
+  })));
+  const key = await consentSigningKey(secret);
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(payload)
+  );
+  return `${payload}.${base64UrlEncode(new Uint8Array(signature))}`;
+}
+
+async function verifyConsentToken(
+  token: string,
+  secret: string
+): Promise<{ oauthRequest: AuthRequest; githubUser: { id: number; login: string } } | undefined> {
+  const parts = token.split(".");
+  if (parts.length !== 2 || parts[0].length === 0 || parts[1].length === 0) {
+    return undefined;
+  }
+
+  try {
+    const key = await consentSigningKey(secret);
+    const validSignature = await crypto.subtle.verify(
+      "HMAC",
+      key,
+      base64UrlDecode(parts[1]),
+      new TextEncoder().encode(parts[0])
+    );
+    if (!validSignature) {
+      return undefined;
+    }
+
+    const parsed = JSON.parse(new TextDecoder().decode(base64UrlDecode(parts[0]))) as {
+      version?: unknown;
+      issuedAt?: unknown;
+      expiresAt?: unknown;
+      nonce?: unknown;
+    };
+    const now = Math.floor(Date.now() / 1000);
+    if (
+      parsed.version !== CONSENT_TOKEN_VERSION ||
+      typeof parsed.issuedAt !== "number" ||
+      !Number.isInteger(parsed.issuedAt) ||
+      typeof parsed.expiresAt !== "number" ||
+      !Number.isInteger(parsed.expiresAt) ||
+      parsed.expiresAt <= now ||
+      parsed.issuedAt > now + 30 ||
+      parsed.expiresAt - parsed.issuedAt !== FLOW_TTL_SECONDS ||
+      typeof parsed.nonce !== "string" ||
+      parsed.nonce.length === 0
+    ) {
+      return undefined;
+    }
+
+    return storedConsent(JSON.stringify(parsed));
+  } catch {
+    return undefined;
+  }
+}
+
+async function consentSigningKey(secret: string): Promise<CryptoKey> {
+  const keyMaterial = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`${CONSENT_KEY_CONTEXT}\0${secret}`)
+  );
+  return crypto.subtle.importKey(
+    "raw",
+    keyMaterial,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign", "verify"]
+  );
+}
+
+function base64UrlEncode(value: Uint8Array): string {
+  let binary = "";
+  for (const byte of value) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+
+function base64UrlDecode(value: string): Uint8Array {
+  const normalized = value.replaceAll("-", "+").replaceAll("_", "/");
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+  return Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
 }
 
 function oauthErrorRedirect(
