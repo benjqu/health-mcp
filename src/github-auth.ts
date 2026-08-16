@@ -55,6 +55,13 @@ export function createGitHubAuthHandler(
         if (incoming.method === "POST") {
           return handleConsent(incoming, env);
         }
+        if (url.searchParams.has("consent_token")) {
+          return completeConsent(
+            url.searchParams.get("consent_token"),
+            url.searchParams.get("action"),
+            env
+          );
+        }
         return handleCallback(incoming, env, request, randomUUID);
       }
 
@@ -191,7 +198,14 @@ async function handleConsent(request: Request, env: Env): Promise<Response> {
     return new Response("Invalid consent response", { status: 400 });
   }
 
-  const consentToken = form.get("consent_token");
+  return completeConsent(form.get("consent_token"), form.get("action"), env);
+}
+
+async function completeConsent(
+  consentToken: unknown,
+  action: unknown,
+  env: Env
+): Promise<Response> {
   if (typeof consentToken !== "string" || consentToken.length === 0) {
     return new Response("Invalid consent response", { status: 400 });
   }
@@ -201,7 +215,7 @@ async function handleConsent(request: Request, env: Env): Promise<Response> {
     return new Response("Invalid consent response", { status: 400 });
   }
 
-  if (form.get("action") !== "approve") {
+  if (action !== "approve") {
     return oauthErrorRedirect(pending.oauthRequest, "access_denied");
   }
 
@@ -287,7 +301,12 @@ async function getGitHubUser(request: typeof fetch, accessToken: string) {
 function consentPage(request: Request, client: ClientInfo, consentToken: string): Response {
   const url = new URL(request.url);
   const clientName = escapeHtml(client.clientName ?? "MCP client");
-  const formAction = escapeHtml(`${url.pathname}${url.search}`);
+  const approveUrl = new URL(url.origin + url.pathname);
+  approveUrl.searchParams.set("action", "approve");
+  approveUrl.searchParams.set("consent_token", consentToken);
+  const denyUrl = new URL(url.origin + url.pathname);
+  denyUrl.searchParams.set("action", "deny");
+  denyUrl.searchParams.set("consent_token", consentToken);
   const html = `<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Authorize Fitness MCP</title></head>
@@ -296,11 +315,8 @@ function consentPage(request: Request, client: ClientInfo, consentToken: string)
     <h1>Authorize Fitness MCP</h1>
     <p>${clientName} is requesting read-only access.</p>
     <p>Scope: ${FITNESS_READ_SCOPE}</p>
-    <form method="post" action="${formAction}">
-      <input type="hidden" name="consent_token" value="${escapeHtml(consentToken)}">
-      <button type="submit" name="action" value="approve">Allow read-only access</button>
-      <button type="submit" name="action" value="deny">Deny</button>
-    </form>
+    <p><a href="${escapeHtml(approveUrl.pathname + approveUrl.search)}" rel="nofollow noreferrer">Allow read-only access</a></p>
+    <p><a href="${escapeHtml(denyUrl.pathname + denyUrl.search)}" rel="nofollow noreferrer">Deny</a></p>
   </main>
 </body>
 </html>`;
