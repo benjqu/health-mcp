@@ -14,8 +14,6 @@ const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
 const GITHUB_USER_URL = "https://api.github.com/user";
 const STATE_PREFIX = "github-oauth-state:";
 const FLOW_TTL_SECONDS = 10 * 60;
-const CONSENT_TOKEN_VERSION = 1;
-const CONSENT_KEY_CONTEXT = "fitness-mcp-consent-v1";
 
 const githubTokenSchema = z.object({
   access_token: z.string().min(1),
@@ -36,7 +34,7 @@ export interface GitHubAuthHandler {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response>;
 }
 
-/** Handles the application-owned GitHub login and consent routes. */
+/** Handles the application-owned GitHub login routes. */
 export function createGitHubAuthHandler(
   dependencies: GitHubAuthDependencies = {}
 ): GitHubAuthHandler {
@@ -52,17 +50,7 @@ export function createGitHubAuthHandler(
       }
 
       if (url.pathname === CALLBACK_PATH) {
-        if (incoming.method === "POST") {
-          return handleConsent(incoming, env);
-        }
-        if (url.searchParams.has("consent_token")) {
-          return completeConsent(
-            url.searchParams.get("consent_token"),
-            url.searchParams.get("action"),
-            env
-          );
-        }
-        return handleCallback(incoming, env, request, randomUUID);
+        return handleCallback(incoming, env, request);
       }
 
       return new Response("Not Found", { status: 404 });
@@ -116,8 +104,7 @@ async function handleAuthorize(
 async function handleCallback(
   request: Request,
   env: Env,
-  githubFetch: typeof fetch,
-  randomUUID: () => string
+  githubFetch: typeof fetch
 ): Promise<Response> {
   if (request.method !== "GET") {
     return methodNotAllowed("GET");
@@ -178,55 +165,14 @@ async function handleCallback(
     return new Response("Invalid authorization request", { status: 400 });
   }
 
-  const consentToken = await createConsentToken({
-    oauthRequest,
-    githubUser: { id: githubUser.id, login: githubUser.login }
-  }, env.GITHUB_CLIENT_SECRET, randomUUID());
-
-  return consentPage(request, client, consentToken);
-}
-
-async function handleConsent(request: Request, env: Env): Promise<Response> {
-  if (request.method !== "POST") {
-    return methodNotAllowed("POST");
-  }
-
-  let form: FormData;
-  try {
-    form = await request.formData();
-  } catch {
-    return new Response("Invalid consent response", { status: 400 });
-  }
-
-  return completeConsent(form.get("consent_token"), form.get("action"), env);
-}
-
-async function completeConsent(
-  consentToken: unknown,
-  action: unknown,
-  env: Env
-): Promise<Response> {
-  if (typeof consentToken !== "string" || consentToken.length === 0) {
-    return new Response("Invalid consent response", { status: 400 });
-  }
-
-  const pending = await verifyConsentToken(consentToken, env.GITHUB_CLIENT_SECRET);
-  if (pending === undefined) {
-    return new Response("Invalid consent response", { status: 400 });
-  }
-
-  if (action !== "approve") {
-    return oauthErrorRedirect(pending.oauthRequest, "access_denied");
-  }
-
   const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
-    request: pending.oauthRequest,
-    userId: String(pending.githubUser.id),
+    request: oauthRequest,
+    userId: String(githubUser.id),
     metadata: undefined,
     scope: [FITNESS_READ_SCOPE],
     props: {
-      githubUserId: pending.githubUser.id,
-      githubLogin: pending.githubUser.login
+      githubUserId: githubUser.id,
+      githubLogin: githubUser.login
     }
   });
 
@@ -298,41 +244,6 @@ async function getGitHubUser(request: typeof fetch, accessToken: string) {
   return githubUserSchema.parse(await response.json());
 }
 
-function consentPage(request: Request, client: ClientInfo, consentToken: string): Response {
-  const url = new URL(request.url);
-  const clientName = escapeHtml(client.clientName ?? "MCP client");
-  const approveUrl = new URL(url.origin + url.pathname);
-  approveUrl.searchParams.set("action", "approve");
-  approveUrl.searchParams.set("consent_token", consentToken);
-  const denyUrl = new URL(url.origin + url.pathname);
-  denyUrl.searchParams.set("action", "deny");
-  denyUrl.searchParams.set("consent_token", consentToken);
-  const html = `<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Authorize Fitness MCP</title></head>
-<body>
-  <main>
-    <h1>Authorize Fitness MCP</h1>
-    <p>${clientName} is requesting read-only access.</p>
-    <p>Scope: ${FITNESS_READ_SCOPE}</p>
-    <p><a href="${escapeHtml(approveUrl.pathname + approveUrl.search)}" rel="nofollow noreferrer">Allow read-only access</a></p>
-    <p><a href="${escapeHtml(denyUrl.pathname + denyUrl.search)}" rel="nofollow noreferrer">Deny</a></p>
-  </main>
-</body>
-</html>`;
-
-  return new Response(html, {
-    headers: {
-      "Cache-Control": "no-store",
-      "Content-Security-Policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-      "Content-Type": "text/html; charset=utf-8",
-      "Referrer-Policy": "no-referrer",
-      "X-Content-Type-Options": "nosniff",
-      "X-Frame-Options": "DENY"
-    }
-  });
-}
-
 function hasExactReadScope(scope: string[]): boolean {
   return scope.length === 1 && scope[0] === FITNESS_READ_SCOPE;
 }
@@ -360,135 +271,6 @@ function storedAuthRequest(value: string): AuthRequest | undefined {
   }
 }
 
-function storedConsent(value: string): {
-  oauthRequest: AuthRequest;
-  githubUser: { id: number; login: string };
-} | undefined {
-  try {
-    const parsed = JSON.parse(value) as {
-      oauthRequest?: unknown;
-      githubUser?: { id?: unknown; login?: unknown };
-    };
-    const oauthRequest = storedAuthRequest(JSON.stringify(parsed.oauthRequest));
-    if (
-      oauthRequest === undefined ||
-      !hasExactReadScope(oauthRequest.scope) ||
-      typeof parsed.githubUser?.id !== "number" ||
-      !Number.isInteger(parsed.githubUser.id) ||
-      parsed.githubUser.id <= 0 ||
-      typeof parsed.githubUser.login !== "string" ||
-      parsed.githubUser.login.length === 0
-    ) {
-      return undefined;
-    }
-    return {
-      oauthRequest,
-      githubUser: { id: parsed.githubUser.id, login: parsed.githubUser.login }
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-async function createConsentToken(
-  pending: { oauthRequest: AuthRequest; githubUser: { id: number; login: string } },
-  secret: string,
-  nonce: string
-): Promise<string> {
-  const issuedAt = Math.floor(Date.now() / 1000);
-  const payload = base64UrlEncode(new TextEncoder().encode(JSON.stringify({
-    version: CONSENT_TOKEN_VERSION,
-    issuedAt,
-    expiresAt: issuedAt + FLOW_TTL_SECONDS,
-    nonce,
-    ...pending
-  })));
-  const key = await consentSigningKey(secret);
-  const signature = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    new TextEncoder().encode(payload)
-  );
-  return `${payload}.${base64UrlEncode(new Uint8Array(signature))}`;
-}
-
-async function verifyConsentToken(
-  token: string,
-  secret: string
-): Promise<{ oauthRequest: AuthRequest; githubUser: { id: number; login: string } } | undefined> {
-  const parts = token.split(".");
-  if (parts.length !== 2 || parts[0].length === 0 || parts[1].length === 0) {
-    return undefined;
-  }
-
-  try {
-    const key = await consentSigningKey(secret);
-    const validSignature = await crypto.subtle.verify(
-      "HMAC",
-      key,
-      base64UrlDecode(parts[1]),
-      new TextEncoder().encode(parts[0])
-    );
-    if (!validSignature) {
-      return undefined;
-    }
-
-    const parsed = JSON.parse(new TextDecoder().decode(base64UrlDecode(parts[0]))) as {
-      version?: unknown;
-      issuedAt?: unknown;
-      expiresAt?: unknown;
-      nonce?: unknown;
-    };
-    const now = Math.floor(Date.now() / 1000);
-    if (
-      parsed.version !== CONSENT_TOKEN_VERSION ||
-      typeof parsed.issuedAt !== "number" ||
-      !Number.isInteger(parsed.issuedAt) ||
-      typeof parsed.expiresAt !== "number" ||
-      !Number.isInteger(parsed.expiresAt) ||
-      parsed.expiresAt <= now ||
-      parsed.issuedAt > now + 30 ||
-      parsed.expiresAt - parsed.issuedAt !== FLOW_TTL_SECONDS ||
-      typeof parsed.nonce !== "string" ||
-      parsed.nonce.length === 0
-    ) {
-      return undefined;
-    }
-
-    return storedConsent(JSON.stringify(parsed));
-  } catch {
-    return undefined;
-  }
-}
-
-async function consentSigningKey(secret: string): Promise<CryptoKey> {
-  const keyMaterial = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(`${CONSENT_KEY_CONTEXT}\0${secret}`)
-  );
-  return crypto.subtle.importKey(
-    "raw",
-    keyMaterial,
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign", "verify"]
-  );
-}
-
-function base64UrlEncode(value: Uint8Array): string {
-  let binary = "";
-  for (const byte of value) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
-}
-
-function base64UrlDecode(value: string): Uint8Array {
-  const normalized = value.replaceAll("-", "+").replaceAll("_", "/");
-  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-  return Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
-}
-
 function oauthErrorRedirect(
   request: AuthRequest,
   code: "access_denied"
@@ -514,13 +296,4 @@ function methodNotAllowed(allow: string): Response {
     status: 405,
     headers: { Allow: allow }
   });
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
 }
