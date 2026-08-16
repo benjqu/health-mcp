@@ -36,14 +36,11 @@ describe("createGitHubAuthHandler", () => {
     const callbackUrl = `${baseUrl}/callback?code=github-code&state=${githubAuthorize.searchParams.get("state")}`;
     const callback = await handler.fetch(new Request(callbackUrl), fixture.env, executionContext());
     expect(callback.status).toBe(200);
-    const consentToken = fieldValue(await callback.text(), "consent_token");
+    const approveUrl = consentLink(await callback.text());
+    const consentToken = approveUrl.searchParams.get("consent_token") ?? "";
     await fixture.env.OAUTH_KV.delete(`github-oauth-consent:${consentToken}`);
 
-    const approve = await handler.fetch(new Request(callbackUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ action: "approve", consent_token: consentToken })
-    }), fixture.env, executionContext());
+    const approve = await handler.fetch(new Request(approveUrl), fixture.env, executionContext());
 
     expect(approve.status).toBe(302);
     expect(approve.headers.get("Location")).toBe("https://client.example/authorized");
@@ -55,11 +52,9 @@ describe("createGitHubAuthHandler", () => {
     });
 
     const tamperedToken = `${consentToken.slice(0, -1)}${consentToken.endsWith("A") ? "B" : "A"}`;
-    const tampered = await handler.fetch(new Request(callbackUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ action: "approve", consent_token: tamperedToken })
-    }), fixture.env, executionContext());
+    const tamperedUrl = new URL(approveUrl);
+    tamperedUrl.searchParams.set("consent_token", tamperedToken);
+    const tampered = await handler.fetch(new Request(tamperedUrl), fixture.env, executionContext());
     expect(tampered.status).toBe(400);
   });
 
@@ -82,12 +77,12 @@ describe("createGitHubAuthHandler", () => {
     expect(response.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
     expect(response.headers.get("Set-Cookie")).toBeNull();
     expect(html).toContain("fitness:read");
-    expect(html).toContain(
-      '<form method="post" action="/callback?code=github-code&amp;state=github-state">'
-    );
+    const approveUrl = consentLink(html);
+    expect(approveUrl.pathname).toBe("/callback");
+    expect(approveUrl.searchParams.get("action")).toBe("approve");
     expect(html).toContain("&lt;script&gt;alert(&quot;unsafe&quot;)&lt;/script&gt;");
     expect(html).not.toContain(`<script>alert("unsafe")</script>`);
-    expect(fieldValue(html, "consent_token").split(".")).toHaveLength(2);
+    expect((approveUrl.searchParams.get("consent_token") ?? "").split(".")).toHaveLength(2);
   });
 
   it("uses the canonical callback, normalizes both logins, and grants only fitness:read", async () => {
@@ -298,13 +293,9 @@ async function completeGitHubFlow(
   const callbackUrl = `${baseUrl}/callback?code=github-code&state=${started.state}`;
   const consent = await handler.fetch(new Request(callbackUrl), env, executionContext());
   expect(consent.status).toBe(200);
-  const consentToken = fieldValue(await consent.text(), "consent_token");
+  const approveUrl = consentLink(await consent.text());
 
-  return handler.fetch(new Request(callbackUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ action: "approve", consent_token: consentToken })
-  }), env, executionContext());
+  return handler.fetch(new Request(approveUrl), env, executionContext());
 }
 
 async function startGitHubFlow(
@@ -325,10 +316,10 @@ async function startGitHubFlow(
   return { state: state ?? "" };
 }
 
-function fieldValue(html: string, name: string): string {
-  const match = html.match(new RegExp(`name="${name}" value="([^"]+)"`));
+function consentLink(html: string): URL {
+  const match = html.match(/<a href="([^"]+)"[^>]*>Allow read-only access<\/a>/u);
   expect(match).not.toBeNull();
-  return match?.[1] ?? "";
+  return new URL((match?.[1] ?? "").replaceAll("&amp;", "&"), baseUrl);
 }
 
 function sequence(...values: string[]): () => string {
