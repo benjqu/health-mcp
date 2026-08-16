@@ -130,16 +130,8 @@ describe("fitness MCP Worker", () => {
       testEnv,
       executionContext()
     );
-    expect(callback.status).toBe(200);
-    const approveUrl = consentLink(await callback.text());
-
-    const approve = await protectedWorker.fetch(
-      new Request(approveUrl),
-      testEnv,
-      executionContext()
-    );
-    expect(approve.status).toBe(302);
-    const clientCallback = new URL(approve.headers.get("Location") ?? "https://missing.example");
+    expect(callback.status).toBe(302);
+    const clientCallback = new URL(callback.headers.get("Location") ?? "https://missing.example");
     expect(clientCallback.origin + clientCallback.pathname).toBe(clientRedirectUri);
     expect(clientCallback.searchParams.get("state")).toBe("client-state");
     const authorizationCode = clientCallback.searchParams.get("code");
@@ -254,12 +246,6 @@ function memoryKv(): KVNamespace {
       };
     }
   } as unknown as KVNamespace;
-}
-
-function consentLink(html: string): URL {
-  const match = html.match(/<a href="([^"]+)"[^>]*>Allow read-only access<\/a>/u);
-  expect(match).not.toBeNull();
-  return new URL((match?.[1] ?? "").replaceAll("&amp;", "&"), baseUrl);
 }
 
 function executionContext(): ExecutionContext {
