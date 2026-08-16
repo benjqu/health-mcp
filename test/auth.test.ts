@@ -21,7 +21,7 @@ const oauthRequest: AuthRequest = {
 };
 
 describe("createGitHubAuthHandler", () => {
-  it("completes GitHub authentication with signed consent despite missing KV visibility and browser cookies", async () => {
+  it("completes authorization directly after the allowlisted GitHub callback", async () => {
     const fixture = authFixture();
     const handler = createGitHubAuthHandler({
       request: githubResponses({ id: 42, login: "octocat" }),
@@ -35,15 +35,8 @@ describe("createGitHubAuthHandler", () => {
 
     const callbackUrl = `${baseUrl}/callback?code=github-code&state=${githubAuthorize.searchParams.get("state")}`;
     const callback = await handler.fetch(new Request(callbackUrl), fixture.env, executionContext());
-    expect(callback.status).toBe(200);
-    const approveUrl = consentLink(await callback.text());
-    const consentToken = approveUrl.searchParams.get("consent_token") ?? "";
-    await fixture.env.OAUTH_KV.delete(`github-oauth-consent:${consentToken}`);
-
-    const approve = await handler.fetch(new Request(approveUrl), fixture.env, executionContext());
-
-    expect(approve.status).toBe(302);
-    expect(approve.headers.get("Location")).toBe("https://client.example/authorized");
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get("Location")).toBe("https://client.example/authorized");
     expect(fixture.completed).toMatchObject({
       request: oauthRequest,
       userId: "42",
@@ -51,38 +44,6 @@ describe("createGitHubAuthHandler", () => {
       props: { githubUserId: 42, githubLogin: "octocat" }
     });
 
-    const tamperedToken = `${consentToken.slice(0, -1)}${consentToken.endsWith("A") ? "B" : "A"}`;
-    const tamperedUrl = new URL(approveUrl);
-    tamperedUrl.searchParams.set("consent_token", tamperedToken);
-    const tampered = await handler.fetch(new Request(tamperedUrl), fixture.env, executionContext());
-    expect(tampered.status).toBe(400);
-  });
-
-  it("renders an escaped consent page for the single read scope", async () => {
-    const fixture = authFixture({
-      clientName: `<script>alert("unsafe")</script>`
-    });
-    const handler = createGitHubAuthHandler({
-      request: githubResponses({ id: 42, login: "octocat" }),
-      randomUUID: sequence("github-state", "consent-token")
-    });
-
-    const started = await startGitHubFlow(handler, fixture.env);
-    const response = await handler.fetch(new Request(
-      `${baseUrl}/callback?code=github-code&state=${started.state}`
-    ), fixture.env, executionContext());
-    const html = await response.text();
-
-    expect(response.status).toBe(200);
-    expect(response.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
-    expect(response.headers.get("Set-Cookie")).toBeNull();
-    expect(html).toContain("fitness:read");
-    const approveUrl = consentLink(html);
-    expect(approveUrl.pathname).toBe("/callback");
-    expect(approveUrl.searchParams.get("action")).toBe("approve");
-    expect(html).toContain("&lt;script&gt;alert(&quot;unsafe&quot;)&lt;/script&gt;");
-    expect(html).not.toContain(`<script>alert("unsafe")</script>`);
-    expect((approveUrl.searchParams.get("consent_token") ?? "").split(".")).toHaveLength(2);
   });
 
   it("uses the canonical callback, normalizes both logins, and grants only fitness:read", async () => {
@@ -182,26 +143,17 @@ describe("createGitHubAuthHandler", () => {
     expect(githubFetch).not.toHaveBeenCalled();
   });
 
-  it.each([
-    { label: "missing", consentToken: undefined },
-    { label: "unknown", consentToken: "wrong-token" }
-  ])("rejects a $label signed consent token", async ({ consentToken }) => {
+  it("rejects POST requests to the GitHub callback", async () => {
     const fixture = authFixture();
     const githubFetch = vi.fn<typeof fetch>();
     const handler = createGitHubAuthHandler({ request: githubFetch });
-    const body = new URLSearchParams({ action: "approve" });
-    if (consentToken !== undefined) {
-      body.set("consent_token", consentToken);
-    }
 
     const response = await handler.fetch(new Request(`${baseUrl}/callback`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body
+      method: "POST"
     }), fixture.env, executionContext());
 
-    expect(response.status).toBe(400);
-    expect(await response.text()).toBe("Invalid consent response");
+    expect(response.status).toBe(405);
+    expect(response.headers.get("Allow")).toBe("GET");
     expect(githubFetch).not.toHaveBeenCalled();
   });
 
@@ -237,7 +189,7 @@ describe("createGitHubAuthHandler", () => {
     const first = await handler.fetch(new Request(callbackUrl), fixture.env, executionContext());
     const replay = await handler.fetch(new Request(callbackUrl), fixture.env, executionContext());
 
-    expect(first.status).toBe(200);
+    expect(first.status).toBe(302);
     expect(replay.status).toBe(400);
     expect(githubFetch).toHaveBeenCalledTimes(2);
   });
@@ -292,10 +244,7 @@ async function completeGitHubFlow(
   const started = await startGitHubFlow(handler, env);
   const callbackUrl = `${baseUrl}/callback?code=github-code&state=${started.state}`;
   const consent = await handler.fetch(new Request(callbackUrl), env, executionContext());
-  expect(consent.status).toBe(200);
-  const approveUrl = consentLink(await consent.text());
-
-  return handler.fetch(new Request(approveUrl), env, executionContext());
+  return consent;
 }
 
 async function startGitHubFlow(
@@ -314,12 +263,6 @@ async function startGitHubFlow(
   expect(state).toBeTruthy();
 
   return { state: state ?? "" };
-}
-
-function consentLink(html: string): URL {
-  const match = html.match(/<a href="([^"]+)"[^>]*>Allow read-only access<\/a>/u);
-  expect(match).not.toBeNull();
-  return new URL((match?.[1] ?? "").replaceAll("&amp;", "&"), baseUrl);
 }
 
 function sequence(...values: string[]): () => string {
