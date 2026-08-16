@@ -124,13 +124,16 @@ describe("fitness MCP Worker", () => {
     const githubState = githubAuthorize.searchParams.get("state");
     expect(githubState).toBeTruthy();
 
-    const callback = await protectedWorker.fetch(new Request(
-      `${baseUrl}/callback?code=github-code&state=${githubState}`
-    ), testEnv, executionContext());
+    const callbackUrl = `${baseUrl}/callback?code=github-code&state=${githubState}`;
+    const callback = await protectedWorker.fetch(
+      new Request(callbackUrl),
+      testEnv,
+      executionContext()
+    );
     expect(callback.status).toBe(200);
     const consentToken = fieldValue(await callback.text(), "consent_token");
 
-    const approve = await protectedWorker.fetch(new Request(`${baseUrl}/consent`, {
+    const approve = await protectedWorker.fetch(new Request(callbackUrl, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ action: "approve", consent_token: consentToken })
