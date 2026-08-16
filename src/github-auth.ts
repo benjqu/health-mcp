@@ -9,7 +9,6 @@ import { readPublicConfig, type Env } from "./env";
 const FITNESS_READ_SCOPE = "fitness:read";
 const AUTHORIZE_PATH = "/authorize";
 const CALLBACK_PATH = "/callback";
-const CONSENT_PATH = "/consent";
 const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
 const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
 const GITHUB_USER_URL = "https://api.github.com/user";
@@ -53,11 +52,10 @@ export function createGitHubAuthHandler(
       }
 
       if (url.pathname === CALLBACK_PATH) {
+        if (incoming.method === "POST") {
+          return handleConsent(incoming, env);
+        }
         return handleCallback(incoming, env, request, randomUUID);
-      }
-
-      if (url.pathname === CONSENT_PATH) {
-        return handleConsent(incoming, env);
       }
 
       return new Response("Not Found", { status: 404 });
@@ -296,7 +294,7 @@ function consentPage(client: ClientInfo, consentToken: string): Response {
     <h1>Authorize Fitness MCP</h1>
     <p>${clientName} is requesting read-only access.</p>
     <p>Scope: ${FITNESS_READ_SCOPE}</p>
-    <form method="post" action="${CONSENT_PATH}">
+    <form method="post" action="">
       <input type="hidden" name="consent_token" value="${escapeHtml(consentToken)}">
       <button type="submit" name="action" value="approve">Allow read-only access</button>
       <button type="submit" name="action" value="deny">Deny</button>
