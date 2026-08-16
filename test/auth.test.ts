@@ -21,7 +21,7 @@ const oauthRequest: AuthRequest = {
 };
 
 describe("createGitHubAuthHandler", () => {
-  it("completes GitHub authentication and one-time consent without browser cookies", async () => {
+  it("completes GitHub authentication with signed consent despite missing KV visibility and browser cookies", async () => {
     const fixture = authFixture();
     const handler = createGitHubAuthHandler({
       request: githubResponses({ id: 42, login: "octocat" }),
@@ -38,6 +38,7 @@ describe("createGitHubAuthHandler", () => {
     ), fixture.env, executionContext());
     expect(callback.status).toBe(200);
     const consentToken = fieldValue(await callback.text(), "consent_token");
+    await fixture.env.OAUTH_KV.delete(`github-oauth-consent:${consentToken}`);
 
     const approve = await handler.fetch(new Request(`${baseUrl}/consent`, {
       method: "POST",
@@ -54,12 +55,13 @@ describe("createGitHubAuthHandler", () => {
       props: { githubUserId: 42, githubLogin: "octocat" }
     });
 
-    const replay = await handler.fetch(new Request(`${baseUrl}/consent`, {
+    const tamperedToken = `${consentToken.slice(0, -1)}${consentToken.endsWith("A") ? "B" : "A"}`;
+    const tampered = await handler.fetch(new Request(`${baseUrl}/consent`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ action: "approve", consent_token: consentToken })
+      body: new URLSearchParams({ action: "approve", consent_token: tamperedToken })
     }), fixture.env, executionContext());
-    expect(replay.status).toBe(400);
+    expect(tampered.status).toBe(400);
   });
 
   it("renders an escaped consent page for the single read scope", async () => {
@@ -83,7 +85,7 @@ describe("createGitHubAuthHandler", () => {
     expect(html).toContain("fitness:read");
     expect(html).toContain("&lt;script&gt;alert(&quot;unsafe&quot;)&lt;/script&gt;");
     expect(html).not.toContain(`<script>alert("unsafe")</script>`);
-    expect(fieldValue(html, "consent_token")).toBe("consent-token");
+    expect(fieldValue(html, "consent_token").split(".")).toHaveLength(2);
   });
 
   it("uses the canonical callback, normalizes both logins, and grants only fitness:read", async () => {
