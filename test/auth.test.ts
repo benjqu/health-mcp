@@ -33,14 +33,13 @@ describe("createGitHubAuthHandler", () => {
     const githubAuthorize = new URL(start.headers.get("Location") ?? "https://missing.example");
     expect(githubAuthorize.origin + githubAuthorize.pathname).toBe("https://github.com/login/oauth/authorize");
 
-    const callback = await handler.fetch(new Request(
-      `${baseUrl}/callback?code=github-code&state=${githubAuthorize.searchParams.get("state")}`
-    ), fixture.env, executionContext());
+    const callbackUrl = `${baseUrl}/callback?code=github-code&state=${githubAuthorize.searchParams.get("state")}`;
+    const callback = await handler.fetch(new Request(callbackUrl), fixture.env, executionContext());
     expect(callback.status).toBe(200);
     const consentToken = fieldValue(await callback.text(), "consent_token");
     await fixture.env.OAUTH_KV.delete(`github-oauth-consent:${consentToken}`);
 
-    const approve = await handler.fetch(new Request(`${baseUrl}/consent`, {
+    const approve = await handler.fetch(new Request(callbackUrl, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ action: "approve", consent_token: consentToken })
@@ -56,7 +55,7 @@ describe("createGitHubAuthHandler", () => {
     });
 
     const tamperedToken = `${consentToken.slice(0, -1)}${consentToken.endsWith("A") ? "B" : "A"}`;
-    const tampered = await handler.fetch(new Request(`${baseUrl}/consent`, {
+    const tampered = await handler.fetch(new Request(callbackUrl, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ action: "approve", consent_token: tamperedToken })
@@ -83,6 +82,7 @@ describe("createGitHubAuthHandler", () => {
     expect(response.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
     expect(response.headers.get("Set-Cookie")).toBeNull();
     expect(html).toContain("fitness:read");
+    expect(html).toContain('<form method="post" action="">');
     expect(html).toContain("&lt;script&gt;alert(&quot;unsafe&quot;)&lt;/script&gt;");
     expect(html).not.toContain(`<script>alert("unsafe")</script>`);
     expect(fieldValue(html, "consent_token").split(".")).toHaveLength(2);
@@ -188,7 +188,7 @@ describe("createGitHubAuthHandler", () => {
   it.each([
     { label: "missing", consentToken: undefined },
     { label: "unknown", consentToken: "wrong-token" }
-  ])("rejects a $label one-time consent token", async ({ consentToken }) => {
+  ])("rejects a $label signed consent token", async ({ consentToken }) => {
     const fixture = authFixture();
     const githubFetch = vi.fn<typeof fetch>();
     const handler = createGitHubAuthHandler({ request: githubFetch });
@@ -197,7 +197,7 @@ describe("createGitHubAuthHandler", () => {
       body.set("consent_token", consentToken);
     }
 
-    const response = await handler.fetch(new Request(`${baseUrl}/consent`, {
+    const response = await handler.fetch(new Request(`${baseUrl}/callback`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body
@@ -293,13 +293,12 @@ async function completeGitHubFlow(
   env: Env
 ): Promise<Response> {
   const started = await startGitHubFlow(handler, env);
-  const consent = await handler.fetch(new Request(
-    `${baseUrl}/callback?code=github-code&state=${started.state}`
-  ), env, executionContext());
+  const callbackUrl = `${baseUrl}/callback?code=github-code&state=${started.state}`;
+  const consent = await handler.fetch(new Request(callbackUrl), env, executionContext());
   expect(consent.status).toBe(200);
   const consentToken = fieldValue(await consent.text(), "consent_token");
 
-  return handler.fetch(new Request(`${baseUrl}/consent`, {
+  return handler.fetch(new Request(callbackUrl, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ action: "approve", consent_token: consentToken })
