@@ -131,13 +131,13 @@ describe("fitness MCP Worker", () => {
       executionContext()
     );
     expect(callback.status).toBe(200);
-    const consentToken = fieldValue(await callback.text(), "consent_token");
+    const approveUrl = consentLink(await callback.text());
 
-    const approve = await protectedWorker.fetch(new Request(callbackUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ action: "approve", consent_token: consentToken })
-    }), testEnv, executionContext());
+    const approve = await protectedWorker.fetch(
+      new Request(approveUrl),
+      testEnv,
+      executionContext()
+    );
     expect(approve.status).toBe(302);
     const clientCallback = new URL(approve.headers.get("Location") ?? "https://missing.example");
     expect(clientCallback.origin + clientCallback.pathname).toBe(clientRedirectUri);
@@ -256,10 +256,10 @@ function memoryKv(): KVNamespace {
   } as unknown as KVNamespace;
 }
 
-function fieldValue(html: string, name: string): string {
-  const match = html.match(new RegExp(`name="${name}" value="([^"]+)"`));
+function consentLink(html: string): URL {
+  const match = html.match(/<a href="([^"]+)"[^>]*>Allow read-only access<\/a>/u);
   expect(match).not.toBeNull();
-  return match?.[1] ?? "";
+  return new URL((match?.[1] ?? "").replaceAll("&amp;", "&"), baseUrl);
 }
 
 function executionContext(): ExecutionContext {
